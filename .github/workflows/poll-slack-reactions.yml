@@ -43,12 +43,20 @@ jobs:
               const eyesReaction = message.reactions?.find(r => r.name === 'eyes');
               if (!eyesReaction) continue;
               
-              // Extract PR number from message
-              const prMatch = message.text?.match(/#(\d+)/);
-              if (!prMatch) continue;
+              // Extract ALL PR numbers from message (handles multiple PRs in one message)
+              const messageText = message.text || '';
+              const prMatches = messageText.matchAll(/#(\d+)/g);
+              const prNumbers = Array.from(prMatches).map(match => parseInt(match[1]));
               
-              const prNumber = parseInt(prMatch[1]);
-              console.log(`Found 👀 reaction on PR #${prNumber}`);
+              if (prNumbers.length === 0) {
+                console.log('⚠️ No PR numbers found in message with 👀 reaction');
+                continue;
+              }
+              
+              console.log(`Found 👀 reaction on message with PRs: ${prNumbers.join(', ')}`);
+              
+              // Process each PR in the message
+              for (const prNumber of prNumbers) {
               
               // Get users who reacted
               for (const userId of eyesReaction.users) {
@@ -125,6 +133,8 @@ jobs:
                         channel: channelId,
                         timestamp: message.ts,
                         name: 'eyes'
+              
+              } // End of PR loop
                       })
                     }
                   );
