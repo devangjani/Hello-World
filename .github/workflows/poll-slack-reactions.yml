@@ -44,10 +44,22 @@ jobs:
               if (!eyesReaction) continue;
               
               // Extract ALL PR numbers from message (handles multiple PRs in one message)
-              // Slack link format: <https://github.com/owner/repo/pull/123|#123: Title>
+              // Try multiple formats: plain text (#123) and Slack links (/pull/123|)
               const messageText = message.text || '';
-              const prMatches = messageText.matchAll(/\/pull\/(\d+)\|/g);
-              const prNumbers = Array.from(prMatches).map(match => parseInt(match[1]));
+              
+              // First try to get from blocks (more reliable for formatted messages)
+              let prNumbers = [];
+              if (message.blocks) {
+                const blocksText = JSON.stringify(message.blocks);
+                const blockMatches = blocksText.matchAll(/\/pull\/(\d+)\|/g);
+                prNumbers = Array.from(blockMatches).map(match => parseInt(match[1]));
+              }
+              
+              // Fallback to plain text format if no PRs found in blocks
+              if (prNumbers.length === 0) {
+                const plainMatches = messageText.matchAll(/#(\d+):/g);
+                prNumbers = Array.from(plainMatches).map(match => parseInt(match[1]));
+              }
               
               if (prNumbers.length === 0) {
                 console.log('⚠️ No PR numbers found in message with 👀 reaction');
