@@ -1,0 +1,193 @@
+name: PR Review Slack Notification
+
+on:
+  schedule:
+    # Run every hour during work hours (9 AM - 5 PM UTC, Monday-Friday)
+    - cron: '0 9-17 * * 1-5'
+  workflow_dispatch:  # Allow manual trigger
+  pull_request:
+    types: [opened, ready_for_review]  # Notify when new PRs are opened
+
+jobs:
+  notify-slack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Open PRs
+        id: get-prs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: pulls } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+
+            // Filter out draft PRs and get review information
+            const prsNeedingReview = [];
+            
+            for (const pr of pulls) {
+              if (pr.draft) continue;
+              
+              // Get reviews for this PR
+              const { data: reviews } = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number
+              });
+              
+              const hasApproval = reviews.some(review => review.state === 'APPROVED');
+              const hasRequestedReviewers = pr.requested_reviewers?.length > 0 || pr.requested_teams?.length > 0;
+              
+              // Include if it has reviewers or hasn't been approved
+              if (hasRequestedReviewers || !hasApproval) {
+                const createdAt = new Date(pr.created_at);
+                const now = new Date();
+                const daysOld = Math.floor((now - createdAt) / (1000 * 60 * 60 * 24));
+                
+                // Priority emoji based on age
+                let priorityEmoji = '🟢';
+                if (daysOld > 7) priorityEmoji = '🔴';
+                else if (daysOld > 3) priorityEmoji = '🟡';
+                
+                // Get reviewer names
+                const reviewers = [
+                  ...(pr.requested_reviewers?.map(r => `@${r.login}`) || []),
+                  ...(pr.requested_teams?.map(t => `@${t.name}`) || [])
+                ];
+                
+                const reviewerText = reviewers.length > 0 
+                  ? reviewers.join(', ') 
+                  : '_No reviewers assigned_';
+                
+                // Get labels
+                const labels = pr.labels?.map(l => `\`${l.name}\``).join(', ') || '';
+                
+                prsNeedingReview.push({
+                  number: pr.number,
+                  title: pr.title,
+                  url: pr.html_url,
+                  author: pr.user.login,
+                  reviewers: reviewerText,
+                  daysOld,
+                  priorityEmoji,
+                  labels
+                });
+              }
+            }
+            
+            return prsNeedingReview;
+
+      - name: Format Slack Message
+        if: steps.get-prs.outputs.result != '[]'
+        id: format-message
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = ${{ steps.get-prs.outputs.result }};
+            
+            const blocks = [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": `📋 Pull Requests Awaiting Review (${prs.length})`,
+                  "emoji": true
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": `*Repository:* \`${context.repo.owner}/${context.repo.repo}\``
+                }
+              },
+              {
+                "type": "divider"
+              }
+            ];
+            
+            for (const pr of prs) {
+              let prText = `${pr.priorityEmoji} *<${pr.url}|#${pr.number}: ${pr.title}>*\n`;
+              prText += `👤 *Author:* ${pr.author}\n`;
+              prText += `👥 *Reviewers:* ${pr.reviewers}\n`;
+              prText += `📅 *Created:* ${pr.daysOld} day${pr.daysOld !== 1 ? 's' : ''} ago\n`;
+              
+              if (pr.labels) {
+                prText += `🏷️ *Labels:* ${pr.labels}\n`;
+              }
+              
+              // Add instruction for claiming review
+              prText += `\n_👀 To claim this review, comment \`/claim\` or \`👀\` on the PR_`;
+              
+              blocks.push({
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": prText
+                },
+                "accessory": {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "👀 Review This",
+                    "emoji": true
+                  },
+                  "url": `${pr.url}#claim-review`,
+                  "action_id": `review_${pr.number}`
+                }
+              });
+              
+              blocks.push({"type": "divider"});
+            }
+            
+            blocks.push({
+              "type": "context",
+              "elements": [
+                {
+                  "type": "mrkdwn",
+                  "text": `Last updated: <!date^${Math.floor(Date.now()/1000)}^{date_num} {time_secs}|${new Date().toISOString()}>`
+                }
+              ]
+            });
+            
+            return JSON.stringify(blocks);
+
+      - name: Send to Slack
+        if: steps.get-prs.outputs.result != '[]'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "${{ fromJSON(steps.get-prs.outputs.result).length }} PR(s) available for review",
+              "blocks": ${{ steps.format-message.outputs.result }}
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+
+      - name: No PRs Message
+        if: steps.get-prs.outputs.result == '[]'
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "No PRs available for review! 🎉",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ *No PRs available for review!*\n\nAll caught up! 🎉"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

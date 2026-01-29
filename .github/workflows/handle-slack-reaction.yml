@@ -1,0 +1,133 @@
+name: Handle Slack Eye Emoji Reaction
+
+on:
+  repository_dispatch:
+    types: [slack-reaction]
+
+jobs:
+  handle-reaction:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Slack User Info
+        id: slack-user
+        uses: actions/github-script@v7
+        env:
+          SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        with:
+          script: |
+            const slackUserId = '${{ github.event.client_payload.user_id }}';
+            const slackToken = process.env.SLACK_TOKEN;
+            
+            // Get Slack user info
+            const response = await fetch(`https://slack.com/api/users.info?user=${slackUserId}`, {
+              headers: {
+                'Authorization': `Bearer ${slackToken}`
+              }
+            });
+            
+            const data = await response.json();
+            const slackDisplayName = data.user?.real_name || data.user?.name || 'Unknown User';
+            
+            return {
+              slackName: slackDisplayName,
+              slackEmail: data.user?.profile?.email
+            };
+
+      - name: Map Slack to GitHub User
+        id: map-user
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const slackEmail = ${{ steps.slack-user.outputs.result }}.slackEmail;
+            const slackName = ${{ steps.slack-user.outputs.result }}.slackName;
+            
+            // Try to find GitHub user by email
+            let githubUsername = null;
+            
+            try {
+              const { data: searchResults } = await github.rest.search.users({
+                q: `${slackEmail} in:email`
+              });
+              
+              if (searchResults.items.length > 0) {
+                githubUsername = searchResults.items[0].login;
+              }
+            } catch (error) {
+              console.log('Could not search users by email');
+            }
+            
+            return {
+              githubUsername,
+              slackName
+            };
+
+      - name: Update PR with Comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = ${{ github.event.client_payload.pr_number }};
+            const userInfo = ${{ steps.map-user.outputs.result }};
+            const githubUsername = userInfo.githubUsername;
+            const slackName = userInfo.slackName;
+            
+            // Create comment on PR
+            const reviewerName = githubUsername ? `@${githubUsername}` : slackName;
+            const commentBody = `👀 **Getting reviewed by ${reviewerName}**\n\n_Claimed via Slack emoji reaction._`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody
+            });
+            
+            console.log(`✅ Added comment to PR #${prNumber}: Getting reviewed by ${reviewerName}`);
+            
+            return { prNumber, githubUsername, slackName };
+
+      - name: Request Review on GitHub
+        if: steps.map-user.outputs.result.githubUsername
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = ${{ github.event.client_payload.pr_number }};
+            const githubUsername = ${{ steps.map-user.outputs.result }}.githubUsername;
+            
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                reviewers: [githubUsername]
+              });
+              
+              console.log(`✅ Added @${githubUsername} as reviewer on PR #${prNumber}`);
+            } catch (error) {
+              console.log(`⚠️ Could not request review: ${error.message}`);
+            }
+
+      - name: Send Confirmation to Slack
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ github.event.client_payload.channel_id }}",
+              "thread_ts": "${{ github.event.client_payload.message_ts }}",
+              "text": "Review assignment confirmed!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "✅ <@${{ github.event.client_payload.user_id }}> is now reviewing PR #${{ github.event.client_payload.pr_number }}"
+                  }
+                }
+              ]
+            }
