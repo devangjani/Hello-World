@@ -1,0 +1,137 @@
+name: Handle PR Review Claim
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  claim-review:
+    # Only run on PR comments
+    if: github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check if claim comment
+        id: check-claim
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body.toLowerCase().trim();
+            const claimKeywords = ['/claim', '👀', '/review', 'reviewing this'];
+            
+            const isClaim = claimKeywords.some(keyword => 
+              comment === keyword || comment.startsWith(keyword)
+            );
+            
+            return isClaim;
+
+      - name: Get PR Details
+        if: steps.check-claim.outputs.result == 'true'
+        id: pr-details
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            return {
+              number: pr.number,
+              title: pr.title,
+              url: pr.html_url,
+              author: pr.user.login
+            };
+
+      - name: Add Reviewer
+        if: steps.check-claim.outputs.result == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const reviewer = context.payload.comment.user.login;
+            const prNumber = context.issue.number;
+            
+            try {
+              // Request review from the user who claimed
+              await github.rest.pulls.requestReviewers({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                reviewers: [reviewer]
+              });
+              
+              console.log(`✅ Added @${reviewer} as reviewer to PR #${prNumber}`);
+            } catch (error) {
+              console.log(`⚠️ Could not request review (may already be assigned): ${error.message}`);
+            }
+
+      - name: Add Status Comment
+        if: steps.check-claim.outputs.result == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const reviewer = context.payload.comment.user.login;
+            const prNumber = context.issue.number;
+            
+            const commentBody = `👀 **PR is now being reviewed by @${reviewer}**\n\n_Claimed via comment. Review status will be tracked._`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody
+            });
+            
+            console.log(`✅ Added status comment to PR #${prNumber}`);
+
+      - name: React to Claim Comment
+        if: steps.check-claim.outputs.result == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Add thumbs up reaction to the claim comment
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: '+1'
+            });
+            
+            // Add eyes reaction
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes'
+            });
+
+      - name: Notify Slack
+        if: steps.check-claim.outputs.result == 'true' && vars.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "text": "PR Review Claimed",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "👀 *PR Review Claimed*\n\n<@${{ github.event.comment.user.login }}> is now reviewing <${{ fromJSON(steps.pr-details.outputs.result).url }}|PR #${{ fromJSON(steps.pr-details.outputs.result).number }}: ${{ fromJSON(steps.pr-details.outputs.result).title }}>"
+                  }
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Repository: `${{ github.repository }}`"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
