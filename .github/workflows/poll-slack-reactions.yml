@@ -110,6 +110,7 @@ jobs:
                   
                   // Check existing reviewers first
                   let existingReviewers = [];
+                  let prAuthor = null;
                   try {
                     const { data: pr } = await github.rest.pulls.get({
                       owner: context.repo.owner,
@@ -117,9 +118,30 @@ jobs:
                       pull_number: prNumber
                     });
                     existingReviewers = pr.requested_reviewers?.map(r => r.login) || [];
+                    prAuthor = pr.user.login;
+                    console.log(`PR Author: ${prAuthor}`);
                     console.log(`Current reviewers: ${existingReviewers.length > 0 ? existingReviewers.join(', ') : 'None'}`);
                   } catch (error) {
                     console.log(`⚠️ Could not fetch PR details: ${error.message}`);
+                  }
+                  
+                  // Check if trying to assign PR author as reviewer
+                  if (githubUsername && prAuthor && githubUsername === prAuthor) {
+                    console.log(`⚠️ Cannot assign @${githubUsername} as reviewer - they are the PR author`);
+                    // Still add comment but skip reviewer assignment
+                    const commentBody = `👀 **Being reviewed by ${slackName}**\n\n_Note: Cannot assign PR author as reviewer, but tracking this claim._`;
+                    try {
+                      await github.rest.issues.createComment({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        issue_number: prNumber,
+                        body: commentBody
+                      });
+                      console.log(`✅ Added comment to PR #${prNumber}`);
+                    } catch (error) {
+                      console.log(`⚠️ Could not add comment: ${error.message}`);
+                    }
+                    continue;
                   }
                   
                   // Skip if this user is already a reviewer
@@ -148,15 +170,19 @@ jobs:
                   // Add reviewer if we found GitHub username
                   if (githubUsername) {
                     try {
-                      await github.rest.pulls.requestReviewers({
+                      console.log(`🔄 Attempting to add @${githubUsername} as reviewer...`);
+                      const result = await github.rest.pulls.requestReviewers({
                         owner: context.repo.owner,
                         repo: context.repo.repo,
                         pull_number: prNumber,
                         reviewers: [githubUsername]
                       });
-                      console.log(`✅ Added @${githubUsername} as reviewer to PR #${prNumber}`);
+                      console.log(`✅ Successfully added @${githubUsername} as reviewer to PR #${prNumber}`);
+                      console.log(`Reviewer assignment result:`, JSON.stringify(result.data.requested_reviewers.map(r => r.login)));
                     } catch (error) {
-                      console.log(`❌ Could not add reviewer: ${error.message}`);
+                      console.log(`❌ Failed to add reviewer: ${error.message}`);
+                      console.log(`Error status: ${error.status}`);
+                      console.log(`Error details:`, JSON.stringify(error.response?.data || {}));
                     }
                   } else {
                     console.log(`⚠️ Cannot assign reviewer - GitHub username not found for ${slackName}`);
