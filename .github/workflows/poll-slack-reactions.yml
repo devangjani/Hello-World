@@ -1,0 +1,136 @@
+name: Poll Slack for Eye Emoji Reactions
+
+on:
+  schedule:
+    # Run every 1 minute
+    - cron: '*/1 * * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-reactions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for eye emoji reactions
+        uses: actions/github-script@v7
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+        with:
+          script: |
+            const slackToken = process.env.SLACK_BOT_TOKEN;
+            const channelId = process.env.SLACK_CHANNEL_ID;
+            
+            if (!slackToken || !channelId) {
+              console.log('⚠️ SLACK_BOT_TOKEN or SLACK_CHANNEL_ID not configured');
+              return;
+            }
+            
+            // Get recent messages from Slack channel
+            const messagesResponse = await fetch(
+              `https://slack.com/api/conversations.history?channel=${channelId}&limit=20`,
+              { headers: { 'Authorization': `Bearer ${slackToken}` }}
+            );
+            const messagesData = await messagesResponse.json();
+            
+            if (!messagesData.ok) {
+              console.log('❌ Failed to fetch Slack messages:', messagesData.error);
+              return;
+            }
+            
+            // Process each message
+            for (const message of messagesData.messages) {
+              // Check if message has eye emoji reactions
+              const eyesReaction = message.reactions?.find(r => r.name === 'eyes');
+              if (!eyesReaction) continue;
+              
+              // Extract PR number from message
+              const prMatch = message.text?.match(/#(\d+)/);
+              if (!prMatch) continue;
+              
+              const prNumber = parseInt(prMatch[1]);
+              console.log(`Found 👀 reaction on PR #${prNumber}`);
+              
+              // Get users who reacted
+              for (const userId of eyesReaction.users) {
+                // Check if we already processed this user's reaction
+                const stateKey = `pr${prNumber}_user${userId}`;
+                
+                // Get user info from Slack
+                const userResponse = await fetch(
+                  `https://slack.com/api/users.info?user=${userId}`,
+                  { headers: { 'Authorization': `Bearer ${slackToken}` }}
+                );
+                const userData = await userResponse.json();
+                const slackEmail = userData.user?.profile?.email;
+                const slackName = userData.user?.real_name || userData.user?.name;
+                
+                // Try to find GitHub user by email
+                let githubUsername = null;
+                if (slackEmail) {
+                  try {
+                    const { data: searchResults } = await github.rest.search.users({
+                      q: `${slackEmail} in:email`
+                    });
+                    if (searchResults.items.length > 0) {
+                      githubUsername = searchResults.items[0].login;
+                    }
+                  } catch (error) {
+                    console.log('Could not search for GitHub user');
+                  }
+                }
+                
+                // Add comment to PR
+                const reviewerName = githubUsername ? `@${githubUsername}` : slackName;
+                const commentBody = `👀 **Getting reviewed by ${reviewerName}**\n\n_Claimed via Slack emoji reaction._`;
+                
+                try {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    body: commentBody
+                  });
+                  console.log(`✅ Added comment to PR #${prNumber} for ${reviewerName}`);
+                } catch (error) {
+                  console.log(`⚠️ Could not add comment: ${error.message}`);
+                  continue;
+                }
+                
+                // Add reviewer if we found GitHub username
+                if (githubUsername) {
+                  try {
+                    await github.rest.pulls.requestReviewers({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: prNumber,
+                      reviewers: [githubUsername]
+                    });
+                    console.log(`✅ Added @${githubUsername} as reviewer to PR #${prNumber}`);
+                  } catch (error) {
+                    console.log(`⚠️ Could not add reviewer: ${error.message}`);
+                  }
+                }
+                
+                // Optional: Remove the reaction to mark as processed
+                try {
+                  await fetch(
+                    'https://slack.com/api/reactions.remove',
+                    {
+                      method: 'POST',
+                      headers: {
+                        'Authorization': `Bearer ${slackToken}`,
+                        'Content-Type': 'application/json'
+                      },
+                      body: JSON.stringify({
+                        channel: channelId,
+                        timestamp: message.ts,
+                        name: 'eyes'
+                      })
+                    }
+                  );
+                  console.log('✅ Removed 👀 reaction (marked as processed)');
+                } catch (error) {
+                  console.log('⚠️ Could not remove reaction');
+                }
+              }
+            }
