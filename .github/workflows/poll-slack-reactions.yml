@@ -25,9 +25,10 @@ jobs:
               return;
             }
             
-            // Get recent messages from Slack channel
+            // Get recent messages from Slack channel (last 2 minutes only for fresh reactions)
+            const twoMinutesAgo = (Date.now() / 1000) - 120; // 2 minutes in seconds
             const messagesResponse = await fetch(
-              `https://slack.com/api/conversations.history?channel=${channelId}&limit=20`,
+              `https://slack.com/api/conversations.history?channel=${channelId}&limit=20&oldest=${twoMinutesAgo}`,
               { headers: { 'Authorization': `Bearer ${slackToken}` }}
             );
             const messagesData = await messagesResponse.json();
@@ -36,6 +37,8 @@ jobs:
               console.log('❌ Failed to fetch Slack messages:', messagesData.error);
               return;
             }
+            
+            console.log(`📥 Found ${messagesData.messages.length} recent messages`);
             
             // Process each message
             for (const message of messagesData.messages) {
@@ -79,6 +82,8 @@ jobs:
                 const slackEmail = userData.user?.profile?.email;
                 const slackName = userData.user?.real_name || userData.user?.name;
                 
+                console.log(`👤 Processing reaction from: ${slackName} (${slackEmail || 'no email'})`);
+                
                 // Try to find GitHub user by email
                 let githubUsername = null;
                 if (slackEmail) {
@@ -88,14 +93,41 @@ jobs:
                     });
                     if (searchResults.items.length > 0) {
                       githubUsername = searchResults.items[0].login;
+                      console.log(`✅ Found GitHub user: @${githubUsername}`);
+                    } else {
+                      console.log(`⚠️ No GitHub user found with email: ${slackEmail}`);
                     }
                   } catch (error) {
-                    console.log('Could not search for GitHub user');
+                    console.log(`⚠️ Could not search for GitHub user: ${error.message}`);
                   }
+                } else {
+                  console.log('⚠️ No email found in Slack profile');
                 }
                 
                 // Process each PR in the message
                 for (const prNumber of prNumbers) {
+                  console.log(`\n🔄 Processing PR #${prNumber}...`);
+                  
+                  // Check existing reviewers first
+                  let existingReviewers = [];
+                  try {
+                    const { data: pr } = await github.rest.pulls.get({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      pull_number: prNumber
+                    });
+                    existingReviewers = pr.requested_reviewers?.map(r => r.login) || [];
+                    console.log(`Current reviewers: ${existingReviewers.length > 0 ? existingReviewers.join(', ') : 'None'}`);
+                  } catch (error) {
+                    console.log(`⚠️ Could not fetch PR details: ${error.message}`);
+                  }
+                  
+                  // Skip if this user is already a reviewer
+                  if (githubUsername && existingReviewers.includes(githubUsername)) {
+                    console.log(`⏭️ @${githubUsername} is already a reviewer on PR #${prNumber}`);
+                    continue;
+                  }
+                  
                   // Add comment to PR
                   const reviewerName = githubUsername ? `@${githubUsername}` : slackName;
                   const commentBody = `👀 **Getting reviewed by ${reviewerName}**\n\n_Claimed via Slack emoji reaction._`;
@@ -124,8 +156,10 @@ jobs:
                       });
                       console.log(`✅ Added @${githubUsername} as reviewer to PR #${prNumber}`);
                     } catch (error) {
-                      console.log(`⚠️ Could not add reviewer: ${error.message}`);
+                      console.log(`❌ Could not add reviewer: ${error.message}`);
                     }
+                  } else {
+                    console.log(`⚠️ Cannot assign reviewer - GitHub username not found for ${slackName}`);
                   }
                 }
                 
